@@ -75,3 +75,110 @@ telemetry to the selected database.
   and Grafana data sources.
 - Keep package versions aligned with your operating environment and update
   through normal change control.
+
+---
+
+## Data Migration: InfluxDB to QuestDB
+
+When migrating historical metrics from InfluxDB to QuestDB, CGSE uses a state tracking file to manage resumable, incremental migration. This prevents duplicate data transfer and allows safe recovery from interruptions.
+
+### Migration State File
+
+**Location:** `.migrate_influx_to_questdb.state.json` (in the relevant project/library directory)
+
+**Purpose:** Tracks the progress of data migration from InfluxDB to QuestDB on a per-table basis.
+
+**File structure:**
+```json
+{
+  "version": 1,
+  "tables": {
+    "<measurement_name>": {
+      "completed": true,
+      "last_time": "2026-03-25T12:00:05.463840Z",
+      "rows_read": 180040,
+      "rows_written": 180040,
+      "updated_at": "2026-04-27T10:45:22.699261Z"
+    }
+  }
+}
+```
+
+**Fields:**
+- `version`: Schema version of the state file (for future compatibility)
+- `tables`: Dictionary of migration progress per measurement/table
+  - `completed`: Whether migration for this table is finished
+  - `last_time`: Timestamp of the last row migrated (used to resume incremental migrations)
+  - `rows_read`: Total rows read from InfluxDB
+  - `rows_written`: Total rows successfully written to QuestDB
+  - `updated_at`: When this record was last updated
+
+### Migration Workflow
+
+1. Migration script reads the state file
+2. Skips tables marked as `completed: true`
+3. For incomplete tables, uses `last_time` to only migrate newer data (avoiding duplicates)
+4. Updates row counts and timestamps as data transfers
+5. On completion, sets `completed: true`
+
+This design ensures:
+- **Idempotent execution**: Re-running the migration script is safe
+- **Resumable**: Interrupted migrations can pick up where they left off
+- **No duplicates**: Only unmigrated data is transferred in subsequent runs
+- **Audit trail**: Complete row counts and timestamps are retained
+
+### Running the Migration Tool
+
+The migration tool is integrated into CGSE as an administrative subcommand.
+
+**Basic usage:**
+
+```bash
+cgse admin migrate-influx-to-questdb
+```
+
+The tool reads configuration from environment variables and falls back to defaults:
+
+- InfluxDB: `CGSE_INFLUX_HOST`, `CGSE_INFLUX_DATABASE`, `INFLUXDB3_AUTH_TOKEN`
+- QuestDB: `CGSE_QUESTDB_HOST`, `CGSE_QUESTDB_PORT`, `CGSE_QUESTDB_DATABASE`, `CGSE_QUESTDB_USER`, `CGSE_QUESTDB_PASSWORD`, `CGSE_QUESTDB_TABLE`, `CGSE_QUESTDB_SCHEMA`
+
+**Common options:**
+
+- `--dry-run`: Preview row counts and inferred schemas without writing to QuestDB
+- `--preflight-only`: Run preflight visibility checks and exit
+- `--tables cm,storagecontrolserver`: Migrate only specific measurements (comma-separated)
+- `--since 2026-01-01T00:00:00Z --until 2026-03-01T00:00:00Z`: Migrate a specific time range
+- `--state-file <path>`: Path to the state file (default: `.migrate_influx_to_questdb.state.json`)
+- `--resume`: Resume from saved checkpoints (default: enabled)
+- `--reset-state`: Delete existing state file before starting (starts fresh)
+- `--questdb-schema unified|per_measurement`: Choose target schema (default from env or `unified`)
+
+**Examples:**
+
+```bash
+# Dry-run to see what would be migrated
+cgse admin migrate-influx-to-questdb --dry-run
+
+# Migrate all measurements (creates state file for resumption)
+cgse admin migrate-influx-to-questdb
+
+# Resume an interrupted migration (picks up from last checkpoint)
+cgse admin migrate-influx-to-questdb
+
+# Migrate only selected measurements into QuestDB per_measurement schema
+cgse admin migrate-influx-to-questdb \
+    --tables DAQ6510,hexapod \
+    --questdb-schema per_measurement
+
+# Migrate a specific time range
+cgse admin migrate-influx-to-questdb \
+    --since 2026-01-01T00:00:00Z \
+    --until 2026-03-01T00:00:00Z
+
+# Start fresh (reset state and re-migrate everything)
+cgse admin migrate-influx-to-questdb --reset-state
+```
+
+**State file location:**
+
+By default, the state file is created in the current working directory as `.migrate_influx_to_questdb.state.json`. You can specify a different location with `--state-file <path>` if needed for multiple concurrent migrations or to organize state files per project.
