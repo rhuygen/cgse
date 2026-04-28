@@ -153,7 +153,7 @@ Important settings:
 
 - `COLLECTOR_PORT`
 - `REQUESTS_PORT`
-- `BACKEND` (`influxdb` or `duckdb`)
+- `BACKEND` (`influxdb`, `duckdb`, or `questdb`)
 - `BATCH_SIZE`
 - `FLUSH_INTERVAL`
 
@@ -162,7 +162,27 @@ Environment variables can override these settings. Typical examples:
 - `CGSE_METRICS_BACKEND`
 - `CGSE_METRICS_BATCH_SIZE`
 - `CGSE_METRICS_FLUSH_INTERVAL`
-- backend-specific variables (`CGSE_INFLUX_*`, `CGSE_DUCKDB_PATH`)
+- backend-specific variables
+
+### InfluxDB 3.x backend variables
+
+- `CGSE_INFLUX_HOST` (default: `http://localhost:8181`)
+- `CGSE_INFLUX_DATABASE` (default: `PROJECT` env var or `cgse`)
+- `INFLUXDB3_AUTH_TOKEN` (default: `""`)
+
+### DuckDB backend variables
+
+- `CGSE_DUCKDB_PATH` (default: `metrics.duckdb`)
+
+### QuestDB backend variables
+
+- `CGSE_QUESTDB_HOST` (default: `localhost`)
+- `CGSE_QUESTDB_PORT` (default: `8812`)
+- `CGSE_QUESTDB_DATABASE` (default: `qdb`)
+- `CGSE_QUESTDB_USER` (default: `admin`)
+- `CGSE_QUESTDB_PASSWORD` (default: `quest`)
+- `CGSE_QUESTDB_TABLE` (default: `timeseries`)
+- `CGSE_QUESTDB_SCHEMA` (default: `per_measurement`; options: `unified`, `per_measurement`)
 
 ## Control Server Integration
 
