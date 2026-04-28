@@ -8,10 +8,12 @@ __all__ = [
     "get_measurement_schema",
     "get_measurement_schemas",
     "get_metrics_repo",
+    "load_measurement_schemas_from_modules",
     "register_measurement_schema",
 ]
 
 import datetime
+import importlib
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
@@ -81,6 +83,27 @@ def get_measurement_schemas() -> dict[str, MeasurementSchema]:
 
 def clear_measurement_schemas() -> None:
     _MEASUREMENT_SCHEMAS.clear()
+
+
+def load_measurement_schemas_from_modules(
+    module_names: list[str],
+    function_name: str = "register_measurement_schemas",
+) -> list[str]:
+    loaded_modules: list[str] = []
+    for module_name in module_names:
+        normalized = module_name.strip()
+        if not normalized:
+            continue
+
+        module = importlib.import_module(normalized)
+        callback = getattr(module, function_name, None)
+        if callback is None or not callable(callback):
+            raise AttributeError(f"Module {normalized!r} does not expose callable {function_name!r}")
+
+        callback()
+        loaded_modules.append(normalized)
+
+    return loaded_modules
 
 
 def define_metrics(

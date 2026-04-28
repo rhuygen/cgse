@@ -12,6 +12,7 @@ from egse.metricshub.client import MetricsHubSender
 from egse.metricshub.server import AsyncMetricsHub
 from egse.metricshub.server import _get_backend_config
 from egse.metricshub.server import _normalize_payload
+from egse.metricshub.server import _register_measurement_schemas_from_env
 from egse.registry import MessageType
 
 
@@ -438,3 +439,23 @@ def test_get_backend_config_unknown_backend(monkeypatch):
 
     with pytest.raises(ValueError, match="Supported: 'influxdb', 'duckdb', 'questdb'"):
         _get_backend_config()
+
+
+def test_register_measurement_schemas_from_env(monkeypatch):
+    monkeypatch.setenv("CGSE_METRICS_SCHEMA_MODULES", "project.schemas")
+    monkeypatch.setenv("CGSE_METRICS_SCHEMA_REGISTER_FUNCTION", "register_measurement_schemas")
+
+    captured = {}
+
+    def fake_loader(modules, function_name):
+        captured["modules"] = modules
+        captured["function_name"] = function_name
+        return ["project.schemas"]
+
+    monkeypatch.setattr("egse.metricshub.server.load_measurement_schemas_from_modules", fake_loader)
+
+    loaded = _register_measurement_schemas_from_env()
+
+    assert loaded == ["project.schemas"]
+    assert captured["modules"] == ["project.schemas"]
+    assert captured["function_name"] == "register_measurement_schemas"

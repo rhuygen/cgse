@@ -1,5 +1,8 @@
 import datetime
 import os
+from types import SimpleNamespace
+
+import pytest
 
 from egse.metrics import DataPoint
 from egse.metrics import MeasurementColumn
@@ -7,6 +10,7 @@ from egse.metrics import MeasurementSchema
 from egse.metrics import clear_measurement_schemas
 from egse.metrics import get_measurement_schema
 from egse.metrics import get_metrics_repo
+from egse.metrics import load_measurement_schemas_from_modules
 from egse.metrics import register_measurement_schema
 
 
@@ -66,3 +70,31 @@ def test_measurement_schema_registry_round_trip():
 
     clear_measurement_schemas()
     assert get_measurement_schema("synthetic_load") is None
+
+
+def test_load_measurement_schemas_from_modules(monkeypatch):
+    clear_measurement_schemas()
+
+    def register_fn():
+        register_measurement_schema(
+            MeasurementSchema(
+                name="camera_tm",
+                fields=(MeasurementColumn("temperature", "double"),),
+            )
+        )
+
+    fake_module = SimpleNamespace(register_measurement_schemas=register_fn)
+
+    monkeypatch.setattr("egse.metrics.importlib.import_module", lambda name: fake_module)
+
+    loaded = load_measurement_schemas_from_modules(["my.schemas"])
+    assert loaded == ["my.schemas"]
+    assert get_measurement_schema("camera_tm") is not None
+
+
+def test_load_measurement_schemas_from_modules_requires_callable(monkeypatch):
+    fake_module = SimpleNamespace(not_register_measurement_schemas=lambda: None)
+    monkeypatch.setattr("egse.metrics.importlib.import_module", lambda name: fake_module)
+
+    with pytest.raises(AttributeError, match="does not expose callable"):
+        load_measurement_schemas_from_modules(["my.schemas"])

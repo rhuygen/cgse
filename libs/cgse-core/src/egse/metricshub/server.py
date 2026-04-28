@@ -33,6 +33,7 @@ from egse.env import str_env
 from egse.log import logger
 from egse.metrics import TimeSeriesRepository
 from egse.metrics import get_metrics_repo
+from egse.metrics import load_measurement_schemas_from_modules
 from egse.settings import Settings
 from egse.system import TyperAsyncCommand
 from egse.system import get_host_ip
@@ -144,6 +145,16 @@ def _load_repository() -> tuple[TimeSeriesRepository, dict[str, Any]]:
     """Build a `TimeSeriesRepository` and safe backend metadata."""
     backend, config, public_info = _get_backend_config()
     return get_metrics_repo(backend, config), public_info
+
+
+def _register_measurement_schemas_from_env() -> list[str]:
+    modules_raw = str_env("CGSE_METRICS_SCHEMA_MODULES", "")
+    modules = [item.strip() for item in modules_raw.split(",") if item.strip()]
+    if not modules:
+        return []
+
+    function_name = str_env("CGSE_METRICS_SCHEMA_REGISTER_FUNCTION", "register_measurement_schemas")
+    return load_measurement_schemas_from_modules(modules, function_name=function_name)
 
 
 class AsyncMetricsHub:
@@ -261,6 +272,13 @@ class AsyncMetricsHub:
 
         # High-water mark so the OS doesn't buffer unboundedly
         self.collector_socket.setsockopt(zmq.RCVHWM, self.collector_rcvhwm)
+
+        loaded_schema_modules = _register_measurement_schemas_from_env()
+        if loaded_schema_modules:
+            self._logger.info(
+                "Loaded measurement schemas from modules: %s",
+                ", ".join(loaded_schema_modules),
+            )
 
         if not self._repository_injected:
             self.repository, self.backend_info = _load_repository()
