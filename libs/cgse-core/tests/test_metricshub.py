@@ -151,6 +151,7 @@ async def test_collector_tracks_none_filtering_debug_counters():
     push = hub.context.socket(zmq.PUSH)
     push.connect(endpoint)
 
+    hub.debug_counters_enabled = True
     hub.running = True
     collector_task = asyncio.create_task(hub._collector())
 
@@ -281,6 +282,7 @@ async def test_sender_to_hub_data_path_over_zmq():
 
     hub.batch_size = 1
     hub.flush_interval = 0.05
+    hub._flush_semaphore = asyncio.Semaphore(hub.flush_concurrency)
     hub.running = True
 
     collector_task = asyncio.create_task(hub._collector())
