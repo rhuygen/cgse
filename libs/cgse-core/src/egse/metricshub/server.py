@@ -9,6 +9,7 @@ Backend selection is driven by the environment variable `CGSE_METRICS_BACKEND`
 (default: `"influxdb"`).  Backend-specific configuration is picked up from the
 environment inside the respective plugin (e.g. `CGSE_INFLUX_*` for InfluxDB).
 DuckDB additionally requires `CGSE_DUCKDB_PATH`.
+QuestDB requires `CGSE_QUESTDB_*` settings.
 """
 
 import asyncio
@@ -105,8 +106,36 @@ def _get_backend_config() -> tuple[str, dict[str, Any], dict[str, Any]]:
                 "name": backend,
                 "db_path": db_path,
             }
+        case "questdb":
+            host = str_env("CGSE_QUESTDB_HOST", "localhost")
+            port = int_env("CGSE_QUESTDB_PORT", 8812)
+            database = str_env("CGSE_QUESTDB_DATABASE", "qdb")
+            user = str_env("CGSE_QUESTDB_USER", "admin")
+            password = str_env("CGSE_QUESTDB_PASSWORD", "quest")
+            table_name = str_env("CGSE_QUESTDB_TABLE", "timeseries")
+            schema = str_env("CGSE_QUESTDB_SCHEMA", "per_measurement").strip().lower()
+            if schema not in {"unified", "per_measurement"}:
+                raise ValueError(f"Invalid CGSE_QUESTDB_SCHEMA '{schema}'. Supported: 'unified', 'per_measurement'.")
+            config = {
+                "host": host,
+                "port": port,
+                "database": database,
+                "user": user,
+                "password": password,
+                "table_name": table_name,
+                "schema": schema,
+            }
+            public_info = {
+                "name": backend,
+                "host": host,
+                "port": port,
+                "database": database,
+                "user": user,
+                "table_name": table_name,
+                "schema": schema,
+            }
         case _:
-            raise ValueError(f"Unknown CGSE_METRICS_BACKEND '{backend}'. Supported: 'influxdb', 'duckdb'.")
+            raise ValueError(f"Unknown CGSE_METRICS_BACKEND '{backend}'. Supported: 'influxdb', 'duckdb', 'questdb'.")
 
     return backend, config, public_info
 
@@ -245,6 +274,20 @@ class AsyncMetricsHub:
             )
 
         self._logger.info("Connected to storage backend.")
+
+        # Respect a backend-imposed concurrency limit.
+        #
+        # QuestDB currently sets max_flush_concurrency=1 because concurrent writes
+        # through the current repository/connection path have been observed to
+        # silently lose rows under load. Keep writes serialized unless the backend
+        # write strategy is redesigned and revalidated.
+        backend_max = getattr(self.repository, "max_flush_concurrency", None)
+        if backend_max is not None and backend_max < self.flush_concurrency:
+            self._logger.info(
+                f"Backend limits flush concurrency to {backend_max} "
+                f"(configured: {self.flush_concurrency}). Using {backend_max}."
+            )
+            self.flush_concurrency = backend_max
 
         self._write_executor = ThreadPoolExecutor(
             max_workers=self.flush_concurrency,
@@ -757,6 +800,7 @@ async def status():
         backend_name = backend.get("name", "unknown")
         backend_reachable = backend.get("reachable", "?")
         repository_class = backend.get("repository_class", "?")
+        backend_schema = backend.get("schema", "n/a")
 
         backend_details_parts: list[str] = []
         if "host" in backend:
@@ -776,6 +820,7 @@ async def status():
                 Backend:         {backend_name}
                   Reachable:     {backend_reachable}
                   Repository:    {repository_class}
+                  Schema:        {backend_schema}
                   Details:       {backend_details}
                 Batch size:      {response["batch_size"]}
                 Max batch size:  {response.get("max_batch_size", response["batch_size"])}
