@@ -3,6 +3,10 @@ import datetime
 import pandas
 import pytest
 
+from egse.metrics import MeasurementColumn
+from egse.metrics import MeasurementSchema
+from egse.metrics import clear_measurement_schemas
+from egse.metrics import register_measurement_schema
 from egse.plugins.metrics.questdb import QuestDBRepository
 from egse.plugins.metrics.questdb import get_repository_class
 
@@ -65,6 +69,13 @@ class FakeConnection:
         self.closed = True
 
 
+@pytest.fixture(autouse=True)
+def clear_registry():
+    clear_measurement_schemas()
+    yield
+    clear_measurement_schemas()
+
+
 def test_connect_creates_table(monkeypatch):
     fake_conn = FakeConnection()
 
@@ -79,7 +90,7 @@ def test_connect_creates_table(monkeypatch):
     repo.connect()
 
     assert repo.conn is fake_conn
-    assert any("CREATE TABLE IF NOT EXISTS timeseries" in query for query, _ in fake_conn.executed)
+    assert any('CREATE TABLE IF NOT EXISTS "timeseries"' in query for query, _ in fake_conn.executed)
 
 
 def test_ping_query_and_close(monkeypatch):
@@ -125,7 +136,7 @@ def test_write_and_helpers(monkeypatch):
 
     assert len(fake_conn.executed_many) == 1
     insert_query, rows = fake_conn.executed_many[0]
-    assert "INSERT INTO metrics" in insert_query
+    assert 'INSERT INTO "metrics"' in insert_query
     assert len(rows) == 1
     assert rows[0][0] == "camera_tm"
 
@@ -143,3 +154,64 @@ def test_write_and_helpers(monkeypatch):
 
 def test_get_repository_class():
     assert get_repository_class() is QuestDBRepository
+
+
+def test_write_uses_declared_measurement_schema(monkeypatch):
+    fake_conn = FakeConnection()
+    monkeypatch.setattr("egse.plugins.metrics.questdb.psycopg.connect", lambda **kwargs: fake_conn)
+
+    register_measurement_schema(
+        MeasurementSchema(
+            name="synthetic_load",
+            tags=(MeasurementColumn("device_id", "symbol"), MeasurementColumn("profile", "symbol")),
+            fields=(MeasurementColumn("temperature", "double"), MeasurementColumn("sample_idx", "long")),
+        )
+    )
+
+    repo = QuestDBRepository(schema="per_measurement")
+    repo.connect()
+    repo.write(
+        {
+            "measurement": "synthetic_load",
+            "tags": {"device_id": "srcA_000", "profile": "source-A"},
+            "fields": {"temperature": 21.5, "sample_idx": 42},
+            "time": "2026-04-24T12:00:00Z",
+        }
+    )
+
+    create_queries = [query for query, _ in fake_conn.executed if 'CREATE TABLE IF NOT EXISTS "synthetic_load"' in query]
+    assert len(create_queries) == 1
+    assert '"device_id" SYMBOL' in create_queries[0]
+    assert '"profile" SYMBOL' in create_queries[0]
+    assert '"temperature" DOUBLE' in create_queries[0]
+    assert '"sample_idx" LONG' in create_queries[0]
+
+    insert_query, rows = fake_conn.executed_many[-1]
+    assert 'INSERT INTO "synthetic_load" ("time", "device_id", "profile", "temperature", "sample_idx")' in insert_query
+    assert rows[0][1:] == ("srcA_000", "source-A", 21.5, 42)
+
+
+def test_write_rejects_unknown_declared_fields(monkeypatch):
+    fake_conn = FakeConnection()
+    monkeypatch.setattr("egse.plugins.metrics.questdb.psycopg.connect", lambda **kwargs: fake_conn)
+
+    register_measurement_schema(
+        MeasurementSchema(
+            name="synthetic_load",
+            tags=(MeasurementColumn("device_id", "symbol"),),
+            fields=(MeasurementColumn("temperature", "double"),),
+        )
+    )
+
+    repo = QuestDBRepository(schema="per_measurement")
+    repo.connect()
+
+    with pytest.raises(ValueError, match="does not match declared schema"):
+        repo.write(
+            {
+                "measurement": "synthetic_load",
+                "tags": {"device_id": "srcA_000"},
+                "fields": {"temperature": 21.5, "sample_idx": 42},
+                "time": "2026-04-24T12:00:00Z",
+            }
+        )

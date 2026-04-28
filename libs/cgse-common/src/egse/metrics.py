@@ -1,11 +1,19 @@
 __all__ = [
     "DataPoint",
+    "MeasurementColumn",
+    "MeasurementSchema",
     "TimeSeriesRepository",
+    "clear_measurement_schemas",
     "define_metrics",
+    "get_measurement_schema",
+    "get_measurement_schemas",
     "get_metrics_repo",
+    "register_measurement_schema",
 ]
 
 import datetime
+from dataclasses import dataclass
+from dataclasses import field
 from typing import Any
 from typing import Optional
 from typing import Protocol
@@ -27,6 +35,52 @@ from egse.system import str_to_datetime
 SITE_ID = Settings.load("SITE").ID
 
 TimestampLike = str | int | float | datetime.datetime
+
+MetricScalarType = str
+
+
+@dataclass(frozen=True)
+class MeasurementColumn:
+    name: str
+    data_type: MetricScalarType
+
+
+@dataclass(frozen=True)
+class MeasurementSchema:
+    name: str
+    tags: tuple[MeasurementColumn, ...] = field(default_factory=tuple)
+    fields: tuple[MeasurementColumn, ...] = field(default_factory=tuple)
+
+    def get_tag(self, name: str) -> MeasurementColumn | None:
+        for column in self.tags:
+            if column.name == name:
+                return column
+        return None
+
+    def get_field(self, name: str) -> MeasurementColumn | None:
+        for column in self.fields:
+            if column.name == name:
+                return column
+        return None
+
+
+_MEASUREMENT_SCHEMAS: dict[str, MeasurementSchema] = {}
+
+
+def register_measurement_schema(schema: MeasurementSchema) -> None:
+    _MEASUREMENT_SCHEMAS[schema.name] = schema
+
+
+def get_measurement_schema(measurement_name: str) -> MeasurementSchema | None:
+    return _MEASUREMENT_SCHEMAS.get(measurement_name)
+
+
+def get_measurement_schemas() -> dict[str, MeasurementSchema]:
+    return dict(_MEASUREMENT_SCHEMAS)
+
+
+def clear_measurement_schemas() -> None:
+    _MEASUREMENT_SCHEMAS.clear()
 
 
 def define_metrics(

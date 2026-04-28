@@ -8,7 +8,9 @@ import psycopg
 from psycopg.rows import dict_row
 
 from egse.metrics import DataPoint
+from egse.metrics import MeasurementSchema
 from egse.metrics import TimeSeriesRepository
+from egse.metrics import get_measurement_schema
 
 __all__ = [
     "QuestDBRepository",
@@ -33,8 +35,10 @@ class QuestDBRepository(TimeSeriesRepository):
     ``"per_measurement"``
         Each measurement gets its own table named after the measurement (e.g.
         ``DAQ6510``), with columns ``(time TIMESTAMP, tags VARCHAR, fields
-        VARCHAR)``.  Mirrors the InfluxDB structure and allows QuestDB to scan
-        only the relevant table, which is faster and easier to browse.
+        VARCHAR)`` by default. When a measurement schema is declared in the
+        shared metrics registry, the table is created with native typed columns
+        instead. This preserves the generic fallback while allowing stable
+        measurements to be stored efficiently.
     """
 
     def __init__(
@@ -154,6 +158,113 @@ class QuestDBRepository(TimeSeriesRepository):
             return point
         return point.as_dict()
 
+    @staticmethod
+    def _questdb_type(data_type: str) -> str:
+        mapping = {
+            "symbol": "SYMBOL",
+            "string": "VARCHAR",
+            "varchar": "VARCHAR",
+            "long": "LONG",
+            "double": "DOUBLE",
+            "boolean": "BOOLEAN",
+            "timestamp": "TIMESTAMP",
+        }
+        normalized = data_type.strip().lower()
+        if normalized not in mapping:
+            raise ValueError(f"Unsupported QuestDB data type {data_type!r}")
+        return mapping[normalized]
+
+    @staticmethod
+    def _coerce_value(value: Any, data_type: str) -> Any:
+        if value is None:
+            return None
+
+        normalized = data_type.strip().lower()
+        if normalized in ("symbol", "string", "varchar"):
+            return str(value)
+        if normalized == "long":
+            return int(value)
+        if normalized == "double":
+            return float(value)
+        if normalized == "boolean":
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in ("true", "1", "yes", "on"):
+                    return True
+                if lowered in ("false", "0", "no", "off"):
+                    return False
+                raise ValueError(f"Cannot coerce {value!r} to boolean")
+            return bool(value)
+        if normalized == "timestamp":
+            return QuestDBRepository._to_datetime(value)
+
+        raise ValueError(f"Unsupported QuestDB data type {data_type!r}")
+
+    @staticmethod
+    def _validate_schema_payload(measurement: str, payload: dict[str, Any], schema: MeasurementSchema) -> None:
+        tags = payload.get("tags") or {}
+        fields = payload.get("fields") or {}
+        tag_names = {column.name for column in schema.tags}
+        field_names = {column.name for column in schema.fields}
+
+        unknown_tags = sorted(set(tags) - tag_names)
+        unknown_fields = sorted(set(fields) - field_names)
+        if unknown_tags or unknown_fields:
+            raise ValueError(
+                f"Measurement {measurement!r} does not match declared schema; "
+                f"unknown tags={unknown_tags}, unknown fields={unknown_fields}"
+            )
+
+    def _ensure_schema_table(self, measurement: str, schema: MeasurementSchema) -> None:
+        if measurement in self._created_tables:
+            return
+
+        columns = ['time TIMESTAMP']
+        for column in schema.tags:
+            columns.append(f'"{column.name}" {self._questdb_type(column.data_type)}')
+        for column in schema.fields:
+            columns.append(f'"{column.name}" {self._questdb_type(column.data_type)}')
+
+        assert self.conn is not None
+        with self.conn.cursor() as cur:
+            cur.execute(
+                f'''
+                CREATE TABLE IF NOT EXISTS "{measurement}" (
+                    {", ".join(columns)}
+                ) TIMESTAMP(time) PARTITION BY DAY
+                '''
+            )
+        self._created_tables.add(measurement)
+
+    def _write_schema_rows(self, measurement: str, schema: MeasurementSchema, payloads: list[dict[str, Any]]) -> None:
+        assert self.conn is not None
+
+        rows: list[tuple[Any, ...]] = []
+        for payload in payloads:
+            self._validate_schema_payload(measurement, payload, schema)
+            tags = payload.get("tags") or {}
+            fields = payload.get("fields") or {}
+            timestamp = self._to_datetime(payload.get("time") or payload.get("timestamp"))
+            row: list[Any] = [timestamp]
+            for column in schema.tags:
+                row.append(self._coerce_value(tags.get(column.name), column.data_type))
+            for column in schema.fields:
+                row.append(self._coerce_value(fields.get(column.name), column.data_type))
+            rows.append(tuple(row))
+
+        column_names = ['"time"']
+        column_names.extend(f'"{column.name}"' for column in schema.tags)
+        column_names.extend(f'"{column.name}"' for column in schema.fields)
+        placeholders = ", ".join(["%s"] * len(column_names))
+
+        with self.conn.cursor() as cur:
+            cur.executemany(
+                f'INSERT INTO "{measurement}" ({", ".join(column_names)}) VALUES ({placeholders})',
+                rows,
+            )
+
     def write(self, points: DataPoint | dict | list[DataPoint | dict]) -> None:
         if self.conn is None:
             raise ConnectionError("Not connected. Call connect() first.")
@@ -181,16 +292,26 @@ class QuestDBRepository(TimeSeriesRepository):
                 )
         else:
             # Group by measurement so we can batch inserts per table
-            by_measurement: dict[str, list[tuple[datetime, str, str]]] = {}
+            by_measurement: dict[str, list[dict[str, Any]]] = {}
             for point in points:
                 payload = self._to_dict(point)
                 measurement = str(payload.get("measurement", "unknown"))
-                timestamp = self._to_datetime(payload.get("time") or payload.get("timestamp"))
-                tags = payload.get("tags") or {}
-                fields = payload.get("fields") or {}
-                by_measurement.setdefault(measurement, []).append((timestamp, json.dumps(tags), json.dumps(fields)))
+                by_measurement.setdefault(measurement, []).append(payload)
 
-            for measurement, mrows in by_measurement.items():
+            for measurement, payloads in by_measurement.items():
+                schema = get_measurement_schema(measurement)
+                if schema is not None:
+                    self._ensure_schema_table(measurement, schema)
+                    self._write_schema_rows(measurement, schema, payloads)
+                    continue
+
+                mrows: list[tuple[datetime, str, str]] = []
+                for payload in payloads:
+                    timestamp = self._to_datetime(payload.get("time") or payload.get("timestamp"))
+                    tags = payload.get("tags") or {}
+                    fields = payload.get("fields") or {}
+                    mrows.append((timestamp, json.dumps(tags), json.dumps(fields)))
+
                 self._ensure_measurement_table(measurement)
                 with self.conn.cursor() as cur:
                     cur.executemany(

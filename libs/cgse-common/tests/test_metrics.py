@@ -2,7 +2,12 @@ import datetime
 import os
 
 from egse.metrics import DataPoint
+from egse.metrics import MeasurementColumn
+from egse.metrics import MeasurementSchema
+from egse.metrics import clear_measurement_schemas
+from egse.metrics import get_measurement_schema
 from egse.metrics import get_metrics_repo
+from egse.metrics import register_measurement_schema
 
 
 def test_datapoint_as_dict_serializes_datetime_timestamp():
@@ -41,3 +46,23 @@ def test_get_metrics_repo():
     print(f"Columns in cm: {result}")
 
     influxdb.close()
+
+
+def test_measurement_schema_registry_round_trip():
+    clear_measurement_schemas()
+    schema = MeasurementSchema(
+        name="synthetic_load",
+        tags=(MeasurementColumn("device_id", "symbol"), MeasurementColumn("profile", "symbol")),
+        fields=(MeasurementColumn("temperature", "double"), MeasurementColumn("sample_idx", "long")),
+    )
+
+    register_measurement_schema(schema)
+
+    stored = get_measurement_schema("synthetic_load")
+    assert stored == schema
+    assert stored is not None
+    assert stored.get_tag("device_id") == MeasurementColumn("device_id", "symbol")
+    assert stored.get_field("temperature") == MeasurementColumn("temperature", "double")
+
+    clear_measurement_schemas()
+    assert get_measurement_schema("synthetic_load") is None
