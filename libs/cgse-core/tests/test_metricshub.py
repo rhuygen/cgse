@@ -10,6 +10,7 @@ from egse.metricshub.client import AsyncMetricsHubSender
 from egse.metricshub.client import MetricsHubClient
 from egse.metricshub.client import MetricsHubSender
 from egse.metricshub.server import AsyncMetricsHub
+from egse.metricshub.server import _get_backend_config
 from egse.metricshub.server import _normalize_payload
 from egse.registry import MessageType
 
@@ -386,3 +387,54 @@ async def test_control_requests_health_info_terminate_in_process():
         hub.collector_socket.close(linger=0)
         hub.requests_socket.close(linger=0)
         hub.context.term()
+
+
+def test_get_backend_config_questdb(monkeypatch):
+    monkeypatch.setenv("CGSE_METRICS_BACKEND", "questdb")
+    monkeypatch.setenv("CGSE_QUESTDB_HOST", "questdb.local")
+    monkeypatch.setenv("CGSE_QUESTDB_PORT", "9000")
+    monkeypatch.setenv("CGSE_QUESTDB_DATABASE", "cgse")
+    monkeypatch.setenv("CGSE_QUESTDB_USER", "cgse_user")
+    monkeypatch.setenv("CGSE_QUESTDB_PASSWORD", "secret")
+    monkeypatch.setenv("CGSE_QUESTDB_TABLE", "metrics_ts")
+    monkeypatch.setenv("CGSE_QUESTDB_SCHEMA", "per_measurement")
+
+    backend, config, public_info = _get_backend_config()
+
+    assert backend == "questdb"
+    assert config == {
+        "host": "questdb.local",
+        "port": 9000,
+        "database": "cgse",
+        "user": "cgse_user",
+        "password": "secret",
+        "table_name": "metrics_ts",
+        "schema": "per_measurement",
+    }
+    assert public_info == {
+        "name": "questdb",
+        "host": "questdb.local",
+        "port": 9000,
+        "database": "cgse",
+        "user": "cgse_user",
+        "table_name": "metrics_ts",
+        "schema": "per_measurement",
+    }
+
+
+def test_get_backend_config_questdb_defaults_to_per_measurement(monkeypatch):
+    monkeypatch.setenv("CGSE_METRICS_BACKEND", "questdb")
+    monkeypatch.delenv("CGSE_QUESTDB_SCHEMA", raising=False)
+
+    backend, config, public_info = _get_backend_config()
+
+    assert backend == "questdb"
+    assert config["schema"] == "per_measurement"
+    assert public_info["schema"] == "per_measurement"
+
+
+def test_get_backend_config_unknown_backend(monkeypatch):
+    monkeypatch.setenv("CGSE_METRICS_BACKEND", "nope")
+
+    with pytest.raises(ValueError, match="Supported: 'influxdb', 'duckdb', 'questdb'"):
+        _get_backend_config()
