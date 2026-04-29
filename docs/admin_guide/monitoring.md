@@ -182,3 +182,33 @@ cgse admin migrate-influx-to-questdb --reset-state
 **State file location:**
 
 By default, the state file is created in the current working directory as `.migrate_influx_to_questdb.state.json`. You can specify a different location with `--state-file <path>` if needed for multiple concurrent migrations or to organize state files per project.
+
+---
+
+## Execute SQL via CGSE Admin
+
+Use the `cgse admin sql` command to run SQL directly against supported metrics backends (`questdb`, `duckdb`, `influxdb`) without switching tools.
+
+Read-only statements are allowed by default. Mutating statements (`DROP`, `ALTER`, `DELETE`, `INSERT`, ...) require `--allow-write`.
+
+### Examples
+
+```bash
+# Read-only query on QuestDB (default backend)
+cgse admin sql 'SELECT table_name FROM tables()'
+
+# Drop a typed measurement table in QuestDB
+cgse admin sql --allow-write 'DROP TABLE IF EXISTS "mh_load_schema";'
+
+# Run SQL on DuckDB
+cgse admin sql --backend duckdb --duckdb-path metrics.duckdb 'SELECT COUNT(*) AS n FROM timeseries;'
+
+# Run SQL on InfluxDB
+cgse admin sql --backend influxdb --influx-database cgse 'SHOW TABLES'
+```
+
+### Notes
+
+- Backend aliases are accepted (`quest`, `duck`, `influx`).
+- Result rows are printed as JSON objects (with `--max-rows` limit).
+- For InfluxDB, set `INFLUXDB3_AUTH_TOKEN` or pass `--influx-token`.

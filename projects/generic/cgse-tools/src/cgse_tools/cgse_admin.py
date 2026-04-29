@@ -89,6 +89,140 @@ def _to_datetime(value: object) -> dt.datetime | None:
     return None
 
 
+def _normalize_backend_name(backend: str) -> str:
+    normalized = backend.strip().lower()
+    if normalized in ("quest", "questdb", "questdbrepository"):
+        return "questdb"
+    if normalized in ("duck", "duckdb", "duckdbrepository"):
+        return "duckdb"
+    if normalized in ("influx", "influxdb", "influxdbrepository"):
+        return "influxdb"
+    return normalized
+
+
+def _is_read_only_statement(sql: str) -> bool:
+    stripped = sql.strip().lower()
+    if not stripped:
+        return True
+
+    read_only_prefixes = (
+        "select",
+        "show",
+        "describe",
+        "explain",
+        "with",
+        "pragma",
+    )
+    return stripped.startswith(read_only_prefixes)
+
+
+def _print_query_result(rows: list[dict[str, object]], max_rows: int) -> None:
+    if not rows:
+        print("Result: statement executed (no rows returned)")
+        return
+
+    print(f"Result rows: {len(rows)}")
+    shown = rows[:max_rows]
+    print(f"Showing: {len(shown)} row(s)")
+    for idx, row in enumerate(shown, start=1):
+        print(f"  {idx}: {json.dumps(row, default=str, sort_keys=True)}")
+    if len(rows) > max_rows:
+        print(f"  ... {len(rows) - max_rows} additional row(s) omitted")
+
+
+def _execute_sql_questdb(
+    statement: str,
+    max_rows: int,
+    questdb_host: str,
+    questdb_port: int,
+    questdb_database: str,
+    questdb_user: str,
+    questdb_password: str,
+    questdb_table: str,
+    questdb_schema: str,
+) -> int:
+    repo = get_metrics_repo(
+        "questdb",
+        {
+            "host": questdb_host,
+            "port": questdb_port,
+            "database": questdb_database,
+            "user": questdb_user,
+            "password": questdb_password,
+            "table_name": questdb_table,
+            "schema": questdb_schema,
+        },
+    )
+
+    try:
+        repo.connect()
+        if not repo.ping():
+            print("ERROR: QuestDB is unreachable")
+            return 4
+
+        rows = repo.query(statement, mode="all")
+        _print_query_result(rows, max_rows=max_rows)
+        return 0
+    finally:
+        repo.close()
+
+
+def _execute_sql_duckdb(
+    statement: str,
+    max_rows: int,
+    duckdb_path: str,
+    duckdb_table: str,
+) -> int:
+    repo = get_metrics_repo(
+        "duckdb",
+        {
+            "db_path": duckdb_path,
+            "table_name": duckdb_table,
+        },
+    )
+
+    try:
+        repo.connect()
+        if not repo.ping():
+            print("ERROR: DuckDB is unreachable")
+            return 5
+
+        rows = repo.query(statement, mode="all")
+        _print_query_result(rows, max_rows=max_rows)
+        return 0
+    finally:
+        repo.close()
+
+
+def _execute_sql_influx(
+    statement: str,
+    max_rows: int,
+    influx_host: str,
+    influx_database: str,
+    influx_token: str,
+) -> int:
+    repo = get_metrics_repo(
+        "influxdb",
+        {
+            "host": influx_host,
+            "database": influx_database,
+            "token": influx_token,
+        },
+    )
+
+    try:
+        repo.connect()
+        if not repo.ping():
+            print("ERROR: InfluxDB is unreachable")
+            return 3
+
+        rows = repo.query(statement, mode="all")
+        _print_query_result(rows, max_rows=max_rows)
+        return 0
+    finally:
+        repo.close()
+
+
 def _collect_questdb_tag_values_sampled(
     repo,
     table: str,
@@ -105,11 +239,7 @@ def _collect_questdb_tag_values_sampled(
         total_seconds = max((max_dt - min_dt).total_seconds(), 1.0)
         bucket_seconds = max(int(total_seconds / max(sample_rows, 1)), 1)
         slices = [
-            (
-                f'SELECT first(tags) AS first_tags, last(tags) AS last_tags '
-                f'FROM "{table}" '
-                f'SAMPLE BY {bucket_seconds}s'
-            )
+            (f'SELECT first(tags) AS first_tags, last(tags) AS last_tags FROM "{table}" SAMPLE BY {bucket_seconds}s')
         ]
 
     merged: dict[str, list[str]] = {}
@@ -690,3 +820,109 @@ def inspect_db(
 
     print(f"ERROR: unsupported backend '{backend}'. Use influxdb, questdb, or duckdb.")
     raise typer.Exit(code=2)
+
+
+@app.command("sql", no_args_is_help=True)
+def execute_sql(
+    statement: Annotated[
+        str,
+        typer.Argument(help="SQL statement to execute (quote it in your shell)."),
+    ],
+    backend: Annotated[
+        str,
+        typer.Option(help="Database backend: influxdb, questdb, or duckdb"),
+    ] = "questdb",
+    allow_write: Annotated[
+        bool,
+        typer.Option(help="Allow non-read-only statements (INSERT/UPDATE/DELETE/DDL)."),
+    ] = False,
+    max_rows: Annotated[int, typer.Option(help="Maximum result rows to print")] = 50,
+    influx_host: Annotated[str, typer.Option(help="InfluxDB host URL")] = "http://localhost:8181",
+    influx_database: Annotated[str, typer.Option(help="InfluxDB database name")] = "",
+    influx_token: Annotated[
+        Optional[str], typer.Option(help="InfluxDB authentication token. Set INFLUXDB3_AUTH_TOKEN if not provided.")
+    ] = None,
+    questdb_host: Annotated[str, typer.Option(help="QuestDB host")] = "localhost",
+    questdb_port: Annotated[int, typer.Option(help="QuestDB port")] = 8812,
+    questdb_database: Annotated[str, typer.Option(help="QuestDB database name")] = "qdb",
+    questdb_user: Annotated[str, typer.Option(help="QuestDB username")] = "admin",
+    questdb_password: Annotated[str, typer.Option(help="QuestDB password")] = "quest",
+    questdb_table: Annotated[str, typer.Option(help="QuestDB unified table name")] = "timeseries",
+    questdb_schema: Annotated[
+        str,
+        typer.Option(help="QuestDB schema mode: unified or per_measurement"),
+    ] = "per_measurement",
+    duckdb_path: Annotated[str, typer.Option(help="DuckDB file path")] = "",
+    duckdb_table: Annotated[str, typer.Option(help="DuckDB main table name")] = "timeseries",
+) -> None:
+    """Execute a SQL statement on a selected metrics backend.
+
+    By default, only read-only statements are allowed. Pass --allow-write for
+    schema or data mutations such as DROP/ALTER/DELETE/INSERT.
+    """
+    backend_normalized = _normalize_backend_name(backend)
+
+    if max_rows <= 0:
+        raise typer.BadParameter("--max-rows must be > 0")
+
+    if not statement.strip():
+        raise typer.BadParameter("statement must not be empty")
+
+    if not allow_write and not _is_read_only_statement(statement):
+        raise typer.BadParameter(
+            "refusing non-read-only SQL without --allow-write; "
+            "use --allow-write for statements like DROP/ALTER/DELETE/INSERT"
+        )
+
+    try:
+        if backend_normalized == "influxdb":
+            if not influx_token:
+                influx_token = os.environ.get("INFLUXDB3_AUTH_TOKEN", "")
+            if not influx_database:
+                influx_database = os.environ.get("CGSE_INFLUX_DATABASE", os.environ.get("PROJECT", "cgse"))
+            if not influx_token:
+                print("ERROR: missing InfluxDB auth token. Set INFLUXDB3_AUTH_TOKEN or pass --influx-token.")
+                raise typer.Exit(code=2)
+
+            exit_code = _execute_sql_influx(
+                statement=statement,
+                max_rows=max_rows,
+                influx_host=influx_host,
+                influx_database=influx_database,
+                influx_token=influx_token,
+            )
+            raise typer.Exit(code=exit_code)
+
+        if backend_normalized == "questdb":
+            exit_code = _execute_sql_questdb(
+                statement=statement,
+                max_rows=max_rows,
+                questdb_host=questdb_host,
+                questdb_port=questdb_port,
+                questdb_database=questdb_database,
+                questdb_user=questdb_user,
+                questdb_password=questdb_password,
+                questdb_table=questdb_table,
+                questdb_schema=questdb_schema,
+            )
+            raise typer.Exit(code=exit_code)
+
+        if backend_normalized == "duckdb":
+            if not duckdb_path:
+                duckdb_path = os.environ.get("CGSE_DUCKDB_PATH", "metrics.duckdb")
+
+            exit_code = _execute_sql_duckdb(
+                statement=statement,
+                max_rows=max_rows,
+                duckdb_path=duckdb_path,
+                duckdb_table=duckdb_table,
+            )
+            raise typer.Exit(code=exit_code)
+
+        print(f"ERROR: unsupported backend '{backend}'. Use influxdb, questdb, or duckdb.")
+        raise typer.Exit(code=2)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        print(f"ERROR: SQL execution failed: {exc}")
+        raise typer.Exit(code=1)

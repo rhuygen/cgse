@@ -32,6 +32,12 @@ class FakeCursor:
             self.conn.rows = [{"table_name": "timeseries"}]
         elif "SHOW COLUMNS FROM" in query:
             self.conn.rows = [{"column": "measurement"}, {"column": "time"}, {"column": "fields"}]
+        elif "information_schema.columns" in query:
+            # Return all columns that are expected by any schema registered in the fake.
+            # We model this as: the table was freshly created so all schema columns exist.
+            measurement = params[0] if params else ""
+            cols = self.conn.schema_columns.get(measurement, [])
+            self.conn.rows = [{"column_name": c} for c in cols]
         elif "SELECT time, fields" in query:
             self.conn.rows = [
                 {
@@ -61,8 +67,12 @@ class FakeConnection:
         self.executed_many = []
         self.rows = []
         self.closed = False
+        # Map measurement name -> list of column_name strings that the fake
+        # 'information_schema.columns' query will return.  Populated by tests
+        # that register schemas so the column-existence check always passes.
+        self.schema_columns: dict[str, list[str]] = {}
 
-    def cursor(self):
+    def cursor(self, row_factory=None):
         return FakeCursor(self)
 
     def close(self):
@@ -168,6 +178,12 @@ def test_write_uses_declared_measurement_schema(monkeypatch):
         )
     )
 
+    # Pre-populate fake schema_columns so the column-existence verification in
+    # _ensure_schema_table succeeds (simulates the table being freshly created).
+    fake_conn.schema_columns["synthetic_load"] = [
+        "time", "device_id", "profile", "temperature", "sample_idx"
+    ]
+
     repo = QuestDBRepository(schema="per_measurement")
     repo.connect()
     repo.write(
@@ -181,8 +197,9 @@ def test_write_uses_declared_measurement_schema(monkeypatch):
 
     create_queries = [query for query, _ in fake_conn.executed if 'CREATE TABLE IF NOT EXISTS "synthetic_load"' in query]
     assert len(create_queries) == 1
-    assert '"device_id" SYMBOL' in create_queries[0]
-    assert '"profile" SYMBOL' in create_queries[0]
+    # SYMBOL is mapped to VARCHAR for PGWire DDL compatibility
+    assert '"device_id" VARCHAR' in create_queries[0]
+    assert '"profile" VARCHAR' in create_queries[0]
     assert '"temperature" DOUBLE' in create_queries[0]
     assert '"sample_idx" LONG' in create_queries[0]
 
@@ -202,6 +219,8 @@ def test_write_rejects_unknown_declared_fields(monkeypatch):
             fields=(MeasurementColumn("temperature", "double"),),
         )
     )
+
+    fake_conn.schema_columns["synthetic_load"] = ["time", "device_id", "temperature"]
 
     repo = QuestDBRepository(schema="per_measurement")
     repo.connect()

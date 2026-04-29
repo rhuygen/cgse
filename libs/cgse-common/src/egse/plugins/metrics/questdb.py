@@ -161,7 +161,10 @@ class QuestDBRepository(TimeSeriesRepository):
     @staticmethod
     def _questdb_type(data_type: str) -> str:
         mapping = {
-            "symbol": "SYMBOL",
+            # SYMBOL is a QuestDB-native type only supported via ILP; when writing
+            # via PGWire DDL, use VARCHAR instead so the column is created and
+            # accessible correctly.  Data is coerced to str either way.
+            "symbol": "VARCHAR",
             "string": "VARCHAR",
             "varchar": "VARCHAR",
             "long": "LONG",
@@ -236,6 +239,28 @@ class QuestDBRepository(TimeSeriesRepository):
                 ) TIMESTAMP(time) PARTITION BY DAY
                 '''
             )
+
+        # Verify that the table actually has the expected columns.  If the table
+        # pre-existed with a different layout (e.g. a prior generic-fallback table
+        # with 'tags'/'fields' JSON columns) the CREATE above is a no-op and
+        # subsequent typed INSERTs will fail with confusing errors.
+        expected = {"time"} | {c.name for c in schema.tags} | {c.name for c in schema.fields}
+        with self.conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = %s",
+                (measurement,),
+            )
+            actual = {row["column_name"] for row in cur.fetchall()}
+
+        missing = expected - actual
+        if missing:
+            raise RuntimeError(
+                f"Table {measurement!r} exists but is missing expected columns {sorted(missing)}. "
+                f"The table may have been created with a different schema (e.g. a generic fallback "
+                f"table). Drop the table or rename your measurement to continue with typed writes."
+            )
+
         self._created_tables.add(measurement)
 
     def _write_schema_rows(self, measurement: str, schema: MeasurementSchema, payloads: list[dict[str, Any]]) -> None:
